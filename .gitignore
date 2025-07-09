@@ -1,0 +1,7 @@
+data/
+models/
+plots/
+results/
+.vscode/
+.history/
+.DS_Store
