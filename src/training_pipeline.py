@@ -8,6 +8,8 @@ import os
 import matplotlib.pyplot as plt
 import random
 from model_definitions import LSTMModel, TransformerModel, CustomModel
+import json
+
 def seed_everything(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -60,7 +62,7 @@ def get_data_loaders(input_window, output_window, batch_size=32):
     return train_loader, test_loader, power_scaler, X_train.shape[2]
 
 
-def train_model(model, train_loader, optimizer, scheduler, num_epochs=500):
+def train_model(model, train_loader, optimizer, num_epochs=500):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     criterion = nn.MSELoss()
@@ -83,7 +85,6 @@ def train_model(model, train_loader, optimizer, scheduler, num_epochs=500):
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_loss:.4f}')
 
-        # scheduler.step()
     return model, avg_loss
 
 def evaluate_model(model, data_loader):
@@ -122,24 +123,13 @@ def run_training_session(horizon):
     for model_name, run_model in models_to_run.items():
         print(f"--- Training {model_name} for {horizon}-day horizon ---")
         
-        mse_scores, mae_scores = [], []
+        results[model_name] = {"MSE": [], "MAE": []}
         
         for i in range(5): # 5 runs
             print(f"Run {i+1}/5")
-            
-            # Re-initialize model for a fresh run
-            # if model_name == "LSTM":
-            #     run_model = LSTMModel(input_dim=input_dim, hidden_dim=64, num_layers=2, output_dim=output_window)
-            # elif model_name == "Transformer":
-            #     run_model = TransformerModel(input_dim=input_dim, d_model=256, nhead=8, num_encoder_layers=2, dim_feedforward=256, output_dim=output_window)
-            # else: # Custom
-            #     run_model = CustomModel(input_dim=input_dim, d_model=64, nhead=4, num_encoder_layers=3, dim_feedforward=256, output_dim=output_window)
-            
-            # Create optimizer and scheduler
+            mse_scores, mae_scores = [], []
             optimizer = torch.optim.Adam(run_model.parameters(), lr=0.005)
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
-
-            trained_model, _ = train_model(run_model, train_loader, optimizer, scheduler)
+            trained_model, _ = train_model(run_model, train_loader, optimizer)
             
             if test_loader:
                 mse, mae, preds, labels = evaluate_model(trained_model, test_loader)
@@ -155,9 +145,6 @@ def run_training_session(horizon):
             
             mse_inv = np.mean((preds_inv - labels_inv)**2)
             mae_inv = np.mean(np.abs(preds_inv - labels_inv))
-            
-            mse_scores.append(mse_inv)
-            mae_scores.append(mae_inv)
             
             if i == 4 and test_loader: # Save results from the last run for plotting
                 # --- Save Model ---
@@ -182,17 +169,19 @@ def run_training_session(horizon):
                 np.save(f'results/{model_name}_train_labels_horizon_{horizon}.npy', train_labels_inv)
 
 
-        results[model_name] = {
-            "MSE_mean": np.mean(mse_scores),
-            "MSE_std": np.std(mse_scores),
-            "MAE_mean": np.mean(mae_scores),
-            "MAE_std": np.std(mae_scores)
-        }
+            results[model_name]["MSE"].append(float(mse_inv))
+            results[model_name]["MAE"].append(float(mae_inv))
+        results[model_name]["MSE_std"] = float(np.std(results[model_name]["MSE"]))
+        results[model_name]["MAE_std"] = float(np.std(results[model_name]["MAE"]))
+        results[model_name]["MSE_mean"] = float(np.mean(results[model_name]["MSE"]))
+        results[model_name]["MAE_mean"] = float(np.mean(results[model_name]["MAE"]))
+        
         print(f"Results for {model_name} (Horizon: {horizon}):")
         print(f"  MSE: {results[model_name]['MSE_mean']:.4f} (+/- {results[model_name]['MSE_std']:.4f})")
         print(f"  MAE: {results[model_name]['MAE_mean']:.4f} (+/- {results[model_name]['MAE_std']:.4f})\n")
 
     return results
+
 
 def main():
     seed_everything()
@@ -206,14 +195,11 @@ def main():
     print("="*20)
     results_365 = run_training_session(horizon=365)
 
-    print("\n--- Final Summary ---")
-    print("\nHorizon: 90 days")
-    for model, metrics in results_90.items():
-        print(f"  {model}: MSE={metrics['MSE_mean']:.4f}, MAE={metrics['MAE_mean']:.4f}")
-        
-    print("\nHorizon: 365 days")
-    for model, metrics in results_365.items():
-        print(f"  {model}: MSE={metrics['MSE_mean']:.4f}, MAE={metrics['MAE_mean']:.4f}")
+    with open('results/results_90.json', 'w') as f:
+        json.dump(results_90, f)
+
+    with open('results/results_365.json', 'w') as f:
+        json.dump(results_365, f)
 
 if __name__ == '__main__':
     main() 
