@@ -5,8 +5,8 @@ import numpy as np
 import json
 import os
 
-from model_definitions import LSTMModel, TransformerModel, HTFN
-from training_pipeline import get_data_loaders, evaluate_model
+from model.model_definitions import LSTMModel, TransformerModel, HTFN
+from train.training_pipeline import get_data_loaders, evaluate_model
 
 # --- Global Settings ---
 N_TRIALS = 50 # Number of trials for Optuna to run
@@ -80,7 +80,7 @@ def objective(trial, model_name, train_loader, test_loader, power_scaler, input_
             optimizer.step()
 
         if (epoch + 1) % EVAL_INTERVAL == 0:
-            mse, mae, preds, labels = evaluate_model(model, test_loader)
+            mse, mae, preds, labels = evaluate_model(model, test_loader, power_scaler, return_preds=True)
             preds_inv = power_scaler.inverse_transform(preds)
             labels_inv = power_scaler.inverse_transform(labels)
             mae_inv = np.mean(np.abs(preds_inv - labels_inv))
@@ -105,7 +105,10 @@ def main():
         # --- Load Data ---
         train_loader, test_loader, power_scaler, input_dim = get_data_loaders(
             input_window=window,
-            output_window=window
+            output_window=window,
+            train_path="./data/processed_train.csv",
+            test_path="./data/processed_test.csv",
+            batch_size=16
         )
 
         if not test_loader:

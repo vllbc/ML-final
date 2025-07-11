@@ -1,0 +1,16 @@
+_target_: src.model.model_definitions.HTFN
+
+# Architecture
+input_dim: null
+output_dim: null
+short_kernel_size: 3
+mid_kernel_size: 7
+long_kernel_size: 15
+gru_hidden_dim: 64
+gru_num_layers: 2
+cross_attention_heads: 8
+transformer_d_model: 64
+transformer_nhead: 4
+transformer_num_layers: 3
+transformer_dim_feedforward: 512
+dropout: 0.5 

@@ -1,0 +1,13 @@
+defaults:
+  - model: htfn # Default model
+  - trainer: default
+  - _self_
+
+data:
+  train_path: 'data/processed_train.csv'
+  test_path: 'data/processed_test.csv'
+
+  input_window_size: 90
+  output_window_size: 90
+
+  batch_size: 16 

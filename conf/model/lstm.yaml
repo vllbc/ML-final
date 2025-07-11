@@ -1,0 +1,7 @@
+_target_: src.model.model_definitions.LSTMModel
+
+# Architecture
+input_dim: null
+output_dim: null
+hidden_dim: 128
+num_layers: 3 

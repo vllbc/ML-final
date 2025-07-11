@@ -1,0 +1,10 @@
+_target_: src.model.model_definitions.TransformerModel
+
+# Architecture
+input_dim: null
+output_dim: null
+d_model: 128
+nhead: 4
+num_encoder_layers: 3
+dim_feedforward: 512
+dropout: 0.1 

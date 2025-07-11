@@ -1,0 +1,23 @@
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 0.0001
+  
+htfn_optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0
+  weight_decay: 0.01
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 290
+  eta_min: 0.00001
+
+num_epochs: 20
+seed: 42
+initial_lr: 0
+warmup_epochs: 10
+peak_lr: 0.0001
+clip_grad_norm: 1.0 
+eval_interval: 10
+num_experiments: 5

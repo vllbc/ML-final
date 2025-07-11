@@ -6,3 +6,4 @@ results/
 .history/
 .DS_Store
 **/__pycache__
+outputs/
