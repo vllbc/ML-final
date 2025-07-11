@@ -18,15 +18,12 @@ def create_sliding_windows(data, input_window_size, output_window_size):
     X, y = [], []
     for i in range(len(data) - input_window_size - output_window_size + 1):
         input_slice = data[i:i + input_window_size]
-        output_slice = data[i + input_window_size:i + input_window_size + output_window_size, 0] # Target is Global_active_power
+        output_slice = data[i + input_window_size:i + input_window_size + output_window_size, 0]
         X.append(input_slice)
         y.append(output_slice)
     return np.array(X), np.array(y)
 
 def get_data_loaders(input_window, output_window, train_path, test_path, batch_size):
-    """
-    Creates and returns train and test data loaders based on config.
-    """
     train_df = pd.read_csv(train_path, index_col='DateTime', parse_dates=True)
     test_df = pd.read_csv(test_path, index_col='DateTime', parse_dates=True)
     
@@ -63,7 +60,6 @@ def train_model(model, train_loader, optimizer, scheduler=None, test_dataloader=
 
     model.train()
     for epoch in range(num_epochs):
-        # Learning Rate Warmup for HTFN
         if epoch < warmup_epochs:
             lr = initial_lr + (peak_lr - initial_lr) * (epoch + 1) / warmup_epochs
             for param_group in optimizer.param_groups:
@@ -126,15 +122,12 @@ def save_results(model_name, horizon, trained_model, train_loader, test_loader, 
     os.makedirs('models', exist_ok=True)
     os.makedirs('results', exist_ok=True)
     
-    # Save Model
     torch.save(trained_model.state_dict(), f'models/{model_name}_horizon_{horizon}.pth')
 
-    # Save Test Set Predictions
     _, _, test_preds_inv, test_labels_inv = evaluate_model(trained_model, test_loader, power_scaler, return_preds=True)
     np.save(f'results/{model_name}_preds_horizon_{horizon}.npy', test_preds_inv)
     np.save(f'results/{model_name}_labels_horizon_{horizon}.npy', test_labels_inv)
 
-    # Save trainer Set Predictions
     _, _, train_preds_inv, train_labels_inv = evaluate_model(trained_model, train_loader, power_scaler, return_preds=True)
     np.save(f'results/{model_name}_train_preds_horizon_{horizon}.npy', train_preds_inv)
     np.save(f'results/{model_name}_train_labels_horizon_{horizon}.npy', train_labels_inv)

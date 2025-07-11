@@ -8,18 +8,13 @@ import os
 from model.model_definitions import LSTMModel, TransformerModel, HTFN
 from train.training_pipeline import get_data_loaders, evaluate_model
 
-# --- Global Settings ---
-N_TRIALS = 50 # Number of trials for Optuna to run
+N_TRIALS = 50
 EPOCHS = 50
 EVAL_INTERVAL = 10
 
 def objective(trial, model_name, train_loader, test_loader, power_scaler, input_dim, horizon):
-    """
-    Optuna objective function.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- 1. Define Hyperparameter Search Space ---
     if model_name == "LSTM":
         hidden_dim = trial.suggest_categorical("hidden_dim", [32, 64, 128, 256])
         num_layers = trial.suggest_int("num_layers", 1, 4)
@@ -65,7 +60,6 @@ def objective(trial, model_name, train_loader, test_loader, power_scaler, input_
     else:
         raise ValueError("Unknown model name")
 
-    # --- 2. Training and Evaluation Loop ---
     criterion = nn.MSELoss()
     test_metrics = []
 
@@ -85,8 +79,6 @@ def objective(trial, model_name, train_loader, test_loader, power_scaler, input_
             labels_inv = power_scaler.inverse_transform(labels)
             mae_inv = np.mean(np.abs(preds_inv - labels_inv))
             test_metrics.append(mae_inv)
-            # Shortened print statement for clarity during tuning runs
-            # print(f"Trial {trial.number}, Ep {epoch+1}, MAE: {mae_inv:.4f}")
 
     if not test_metrics:
         return float('inf')
@@ -102,7 +94,6 @@ def main():
         print(f"\n{'='*30}\nStarting tuning for INPUT_WINDOW={window}, HORIZON={window}\n{'='*30}")
         all_best_params[f"window_{window}"] = {}
         
-        # --- Load Data ---
         train_loader, test_loader, power_scaler, input_dim = get_data_loaders(
             input_window=window,
             output_window=window,
@@ -135,7 +126,6 @@ def main():
                 "params": study.best_params
             }
 
-    # --- Save all results to a single JSON file ---
     output_path = 'results/best_hyperparameters.json'
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:

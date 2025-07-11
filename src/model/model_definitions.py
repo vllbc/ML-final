@@ -62,7 +62,6 @@ class HTFN(nn.Module):
 
         self.gru_hidden_dim = gru_hidden_dim
 
-        # 1. Multi-Scale Convolutional Decomposer (MCD)
         self.short_stream = nn.Sequential(
             nn.Conv1d(input_dim, gru_hidden_dim, kernel_size=short_kernel_size, padding='same'),
             nn.ReLU(),
@@ -79,12 +78,10 @@ class HTFN(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # 2. Scale-Aware Recurrent Encoder (SRE)
         self.gru_short = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
         self.gru_mid = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
         self.gru_long = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
 
-        # 3. Cross-Scale Attention Fuser (CSAF)
         self.attention_short = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
         self.attention_mid = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
         self.attention_long = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
@@ -92,7 +89,6 @@ class HTFN(nn.Module):
         self.norm2 = nn.LayerNorm(gru_hidden_dim)
         self.norm3 = nn.LayerNorm(gru_hidden_dim)
         
-        # 4. Predictive Aggregation Decoder (PAD)
         self.projection = nn.Linear(3 * gru_hidden_dim, transformer_d_model)
         
         encoder_layer = nn.TransformerEncoderLayer(
@@ -107,46 +103,36 @@ class HTFN(nn.Module):
         self.output_decoder = nn.Linear(transformer_d_model, output_dim)
 
     def forward(self, src):
-        # src shape: (batch_size, seq_len, input_dim)
-        
-        # MCD expects: (batch_size, input_dim, seq_len)
         src_permuted = src.permute(0, 2, 1)
         
         short_out = self.short_stream(src_permuted).permute(0, 2, 1) # -> (batch, seq, gru_hidden)
         mid_out = self.mid_stream(src_permuted).permute(0, 2, 1)
         long_out = self.long_stream(src_permuted).permute(0, 2, 1)
 
-        # SRE
         gru_short_out, _ = self.gru_short(short_out)
         gru_mid_out, _ = self.gru_mid(mid_out)
         gru_long_out, _ = self.gru_long(long_out)
 
-        # CSAF
-        # Refine short features
         short_q = gru_short_out
         mid_long_kv = torch.cat([gru_mid_out, gru_long_out], dim=1)
         refined_short, _ = self.attention_short(short_q, mid_long_kv, mid_long_kv)
         refined_short = self.norm1(refined_short + short_q)
 
-        # Refine mid features
         mid_q = gru_mid_out
         short_long_kv = torch.cat([gru_short_out, gru_long_out], dim=1)
         refined_mid, _ = self.attention_mid(mid_q, short_long_kv, short_long_kv)
         refined_mid = self.norm2(refined_mid + mid_q)
 
-        # Refine long features
         long_q = gru_long_out
         short_mid_kv = torch.cat([gru_short_out, gru_mid_out], dim=1)
         refined_long, _ = self.attention_long(long_q, short_mid_kv, short_mid_kv)
         refined_long = self.norm3(refined_long + long_q)
 
-        # PAD
         fused_features = torch.cat([refined_short, refined_mid, refined_long], dim=2)
         projected_features = self.projection(fused_features)
         
         transformer_out = self.transformer_encoder(projected_features)
         
-        # Take the output of the last time step
         final_representation = transformer_out[:, -1, :]
         
         output = self.output_decoder(final_representation)
