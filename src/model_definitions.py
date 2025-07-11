@@ -53,52 +53,102 @@ class TransformerModel(nn.Module):
         output = self.decoder(memory[:, -1, :])
         return output
 
-class CustomModel(nn.Module):
-    def __init__(self, input_dim, d_model, nhead, num_encoder_layers, dim_feedforward, output_dim, cnn_out_channels=64, kernel_size=3, dropout=0.1):
-        super(CustomModel, self).__init__()
-        self.d_model = d_model
-        
-        # CNN layers
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=input_dim, out_channels=cnn_out_channels, kernel_size=kernel_size, padding='same'),
+class HTFN(nn.Module):
+    def __init__(self, input_dim, output_dim, short_kernel_size=3, mid_kernel_size=7, long_kernel_size=15, 
+                 gru_hidden_dim=64, gru_num_layers=2, cross_attention_heads=4, 
+                 transformer_d_model=128, transformer_nhead=4, transformer_num_layers=3, 
+                 transformer_dim_feedforward=256, dropout=0.1):
+        super(HTFN, self).__init__()
+
+        self.gru_hidden_dim = gru_hidden_dim
+
+        # 1. Multi-Scale Convolutional Decomposer (MCD)
+        self.short_stream = nn.Sequential(
+            nn.Conv1d(input_dim, gru_hidden_dim, kernel_size=short_kernel_size, padding='same'),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
-        
-        # The input to the transformer will be the output from the CNN
-        self.encoder_layer = nn.Linear(cnn_out_channels, d_model)
-        
-        # Positional Encoding
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.mid_stream = nn.Sequential(
+            nn.Conv1d(input_dim, gru_hidden_dim, kernel_size=mid_kernel_size, padding='same', dilation=2),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        self.long_stream = nn.Sequential(
+            nn.Conv1d(input_dim, gru_hidden_dim, kernel_size=long_kernel_size, padding='same', dilation=4),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
 
-        # Transformer Encoder
-        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_encoder_layers)
+        # 2. Scale-Aware Recurrent Encoder (SRE)
+        self.gru_short = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
+        self.gru_mid = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
+        self.gru_long = nn.GRU(gru_hidden_dim, gru_hidden_dim, gru_num_layers, batch_first=True, dropout=dropout)
+
+        # 3. Cross-Scale Attention Fuser (CSAF)
+        self.attention_short = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
+        self.attention_mid = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
+        self.attention_long = nn.MultiheadAttention(gru_hidden_dim, cross_attention_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(gru_hidden_dim)
+        self.norm2 = nn.LayerNorm(gru_hidden_dim)
+        self.norm3 = nn.LayerNorm(gru_hidden_dim)
         
-        # Final linear layer
-        self.decoder = nn.Linear(d_model, output_dim)
+        # 4. Predictive Aggregation Decoder (PAD)
+        self.projection = nn.Linear(3 * gru_hidden_dim, transformer_d_model)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_d_model, 
+            nhead=transformer_nhead, 
+            dim_feedforward=transformer_dim_feedforward, 
+            dropout=dropout, 
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=transformer_num_layers)
+        
+        self.output_decoder = nn.Linear(transformer_d_model, output_dim)
 
     def forward(self, src):
         # src shape: (batch_size, seq_len, input_dim)
-        # CNN expects: (batch_size, input_dim, seq_len)
-        src = src.permute(0, 2, 1)
         
-        # Pass through CNN
-        cnn_out = self.cnn(src) # (batch_size, cnn_out_channels, seq_len)
+        # MCD expects: (batch_size, input_dim, seq_len)
+        src_permuted = src.permute(0, 2, 1)
         
-        # Permute for transformer: (batch_size, seq_len, cnn_out_channels)
-        cnn_out = cnn_out.permute(0, 2, 1)
+        short_out = self.short_stream(src_permuted).permute(0, 2, 1) # -> (batch, seq, gru_hidden)
+        mid_out = self.mid_stream(src_permuted).permute(0, 2, 1)
+        long_out = self.long_stream(src_permuted).permute(0, 2, 1)
+
+        # SRE
+        gru_short_out, _ = self.gru_short(short_out)
+        gru_mid_out, _ = self.gru_mid(mid_out)
+        gru_long_out, _ = self.gru_long(long_out)
+
+        # CSAF
+        # Refine short features
+        short_q = gru_short_out
+        mid_long_kv = torch.cat([gru_mid_out, gru_long_out], dim=1)
+        refined_short, _ = self.attention_short(short_q, mid_long_kv, mid_long_kv)
+        refined_short = self.norm1(refined_short + short_q)
+
+        # Refine mid features
+        mid_q = gru_mid_out
+        short_long_kv = torch.cat([gru_short_out, gru_long_out], dim=1)
+        refined_mid, _ = self.attention_mid(mid_q, short_long_kv, short_long_kv)
+        refined_mid = self.norm2(refined_mid + mid_q)
+
+        # Refine long features
+        long_q = gru_long_out
+        short_mid_kv = torch.cat([gru_short_out, gru_mid_out], dim=1)
+        refined_long, _ = self.attention_long(long_q, short_mid_kv, short_mid_kv)
+        refined_long = self.norm3(refined_long + long_q)
+
+        # PAD
+        fused_features = torch.cat([refined_short, refined_mid, refined_long], dim=2)
+        projected_features = self.projection(fused_features)
         
-        # Project to d_model
-        src = self.encoder_layer(cnn_out)
-        
-        # Add positional encoding
-        src = self.pos_encoder(src)
-        
-        # Pass through transformer encoder
-        transformer_out = self.transformer_encoder(src)
+        transformer_out = self.transformer_encoder(projected_features)
         
         # Take the output of the last time step
-        output = self.decoder(transformer_out[:, -1, :])
+        final_representation = transformer_out[:, -1, :]
+        
+        output = self.output_decoder(final_representation)
         
         return output 

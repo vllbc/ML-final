@@ -1,93 +1,145 @@
+import optuna
 import torch
-import torch.optim as optim
-import itertools
-import pandas as pd
+import torch.nn as nn
+import numpy as np
+import json
+import os
 
-from model_definitions import LSTMModel, TransformerModel, CustomModel
-from training_pipeline import get_data_loaders, train_model, evaluate_model
+from model_definitions import LSTMModel, TransformerModel, HTFN
+from training_pipeline import get_data_loaders, evaluate_model
 
-def tune_hyperparameters():
+# --- Global Settings ---
+N_TRIALS = 50 # Number of trials for Optuna to run
+EPOCHS = 50
+EVAL_INTERVAL = 10
+
+def objective(trial, model_name, train_loader, test_loader, power_scaler, input_dim, horizon):
     """
-    Performs a grid search for hyperparameters for all model types.
+    Optuna objective function.
     """
-    # Use the shorter horizon for faster tuning
-    input_window = 90
-    output_window = 90
-    
-    # Use larger batch for tuning. Note: get_data_loaders no longer returns val_loader
-    train_loader, _, _, input_dim = get_data_loaders(input_window, output_window, batch_size=64) 
-    
-    param_grid = {
-        'LSTM': {
-            'hidden_dim': [32, 64],
-            'num_layers': [1, 2],
-            'learning_rate': [0.001, 0.0005]
-        },
-        'Transformer': {
-            'd_model': [32, 64, 128, 256, 512],
-            'nhead': [2, 4, 8, 16],
-            'num_encoder_layers': [2, 3, 4, 5],
-            'learning_rate': [0.001, 0.0005]
-        },
-        'Custom': {
-            'd_model': [32, 64],
-            'nhead': [2, 4],
-            'cnn_out_channels': [32, 64],
-            'learning_rate': [0.001, 0.0005]
-        }
-    }
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    best_params_overall = {}
+    # --- 1. Define Hyperparameter Search Space ---
+    if model_name == "LSTM":
+        hidden_dim = trial.suggest_categorical("hidden_dim", [32, 64, 128, 256])
+        num_layers = trial.suggest_int("num_layers", 1, 4)
+        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+        model = LSTMModel(input_dim, hidden_dim, num_layers, horizon).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    for model_name, grid in param_grid.items():
-        print(f"\n--- Tuning Hyperparameters for {model_name} ---")
-        best_train_loss = float('inf')
-        best_params_for_model = {}
+    elif model_name == "Transformer":
+        d_model = trial.suggest_categorical("d_model", [32, 64, 128, 256])
+        nhead = trial.suggest_categorical("nhead", [2, 4, 8])
+        num_encoder_layers = trial.suggest_int("num_encoder_layers", 1, 6)
+        dim_feedforward = trial.suggest_categorical("dim_feedforward", [128, 256, 512, 1024])
+        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+        dropout = trial.suggest_float("dropout", 0.1, 0.5)
+        model = TransformerModel(input_dim, d_model, nhead, num_encoder_layers, dim_feedforward, horizon, dropout).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         
-        # Generate all combinations of hyperparameters
-        keys, values = zip(*grid.items())
-        hyperparameter_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    elif model_name == "HTFN":
+        gru_hidden_dim = trial.suggest_categorical("gru_hidden_dim", [32, 64, 128])
+        gru_num_layers = trial.suggest_int("gru_num_layers", 1, 3)
+        cross_attention_heads = trial.suggest_categorical("cross_attention_heads", [2, 4, 8])
+        transformer_d_model = trial.suggest_categorical("transformer_d_model", [64, 128, 256])
+        transformer_nhead = trial.suggest_categorical("transformer_nhead", [2, 4, 8])
+        transformer_num_layers = trial.suggest_int("transformer_num_layers", 1, 4)
+        transformer_dim_feedforward = trial.suggest_categorical("transformer_dim_feedforward", [256, 512, 1024])
+        lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+        dropout = trial.suggest_float("dropout", 0.1, 0.5)
         
-        for i, params in enumerate(hyperparameter_combinations):
-            print(f"  Testing combination {i+1}/{len(hyperparameter_combinations)}: {params}")
+        model = HTFN(
+            input_dim=input_dim,
+            output_dim=horizon,
+            gru_hidden_dim=gru_hidden_dim,
+            gru_num_layers=gru_num_layers,
+            cross_attention_heads=cross_attention_heads,
+            transformer_d_model=transformer_d_model,
+            transformer_nhead=transformer_nhead,
+            transformer_num_layers=transformer_num_layers,
+            transformer_dim_feedforward=transformer_dim_feedforward,
+            dropout=dropout
+        ).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-            # Pop learning_rate as it's not a model parameter
-            lr = params.pop('learning_rate')
+    else:
+        raise ValueError("Unknown model name")
 
-            # Instantiate model with current params
-            if model_name == 'LSTM':
-                model = LSTMModel(input_dim=input_dim, output_dim=output_window, **params)
-            elif model_name == 'Transformer':
-                model = TransformerModel(input_dim=input_dim, dim_feedforward=256, output_dim=output_window, **params)
-            elif model_name == 'Custom':
-                model = CustomModel(input_dim=input_dim, num_encoder_layers=3, dim_feedforward=256, output_dim=output_window, **params)
+    # --- 2. Training and Evaluation Loop ---
+    criterion = nn.MSELoss()
+    test_metrics = []
 
-            # Add it back for logging
-            params['learning_rate'] = lr
+    for epoch in range(EPOCHS):
+        model.train()
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
 
-            # Create optimizer and scheduler
-            optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
-            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+        if (epoch + 1) % EVAL_INTERVAL == 0:
+            mse, mae, preds, labels = evaluate_model(model, test_loader)
+            preds_inv = power_scaler.inverse_transform(preds)
+            labels_inv = power_scaler.inverse_transform(labels)
+            mae_inv = np.mean(np.abs(preds_inv - labels_inv))
+            test_metrics.append(mae_inv)
+            # Shortened print statement for clarity during tuning runs
+            # print(f"Trial {trial.number}, Ep {epoch+1}, MAE: {mae_inv:.4f}")
+
+    if not test_metrics:
+        return float('inf')
+        
+    return np.mean(test_metrics)
+
+
+def main():
+    windows_to_tune = [90, 365]
+    all_best_params = {}
+
+    for window in windows_to_tune:
+        print(f"\n{'='*30}\nStarting tuning for INPUT_WINDOW={window}, HORIZON={window}\n{'='*30}")
+        all_best_params[f"window_{window}"] = {}
+        
+        # --- Load Data ---
+        train_loader, test_loader, power_scaler, input_dim = get_data_loaders(
+            input_window=window,
+            output_window=window
+        )
+
+        if not test_loader:
+            print(f"Test loader is empty for window size {window}. Cannot run hyperparameter tuning. Skipping.")
+            continue
             
-            # Train for fewer epochs for speed, get the final training loss
-            _, loss = train_model(model, train_loader, optimizer, scheduler, num_epochs=20)
+        for model_name in ["LSTM", "Transformer", "HTFN"]:
+            print(f"\n--- Tuning for {model_name} ---")
             
-            if loss < best_train_loss:
-                best_train_loss = loss
-                best_params_for_model = params
+            study = optuna.create_study(direction="minimize")
+            study.optimize(
+                lambda trial: objective(trial, model_name, train_loader, test_loader, power_scaler, input_dim, horizon=window),
+                n_trials=N_TRIALS
+            )
 
-        best_params_overall[model_name] = best_params_for_model
-        print(f"  Best Training Loss for {model_name}: {best_train_loss:.4f}")
-        print(f"  Best Hyperparameters for {model_name}: {best_params_for_model}")
+            print(f"\nBest trial for {model_name} (Window: {window}):")
+            print(f"  Value (Avg MAE): {study.best_value:.4f}")
+            print("  Params: ")
+            for key, value in study.best_params.items():
+                print(f"    {key}: {value}")
+            
+            all_best_params[f"window_{window}"][model_name] = {
+                "value": study.best_value,
+                "params": study.best_params
+            }
 
-    print("\n--- Best Hyperparameters Found ---")
-    for model_name, params in best_params_overall.items():
-        print(f"  {model_name}: {params}")
+    # --- Save all results to a single JSON file ---
+    output_path = 'results/best_hyperparameters.json'
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(all_best_params, f, indent=4)
         
-    # Save best params to a file
-    pd.DataFrame(best_params_overall).to_json("results/best_hyperparameters.json", indent=4)
-    print("\nBest hyperparameters saved to results/best_hyperparameters.json")
+    print(f"\n\nAll tuning complete. Best hyperparameters saved to {output_path}")
 
 
 if __name__ == '__main__':
-    tune_hyperparameters() 
+    main() 

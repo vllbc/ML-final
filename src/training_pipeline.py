@@ -7,7 +7,7 @@ from sklearn.preprocessing import MinMaxScaler
 import os
 import matplotlib.pyplot as plt
 import random
-from model_definitions import LSTMModel, TransformerModel, CustomModel
+from model_definitions import LSTMModel, TransformerModel, HTFN
 import json
 
 def seed_everything(seed=42):
@@ -26,7 +26,7 @@ def create_sliding_windows(data, input_window_size, output_window_size):
         y.append(output_slice)
     return np.array(X), np.array(y)
 
-def get_data_loaders(input_window, output_window, batch_size=32):
+def get_data_loaders(input_window, output_window, batch_size=16):
     """
     Creates and returns train and test data loaders.
     The scaler is fit ONLY on the training data.
@@ -62,9 +62,10 @@ def get_data_loaders(input_window, output_window, batch_size=32):
     return train_loader, test_loader, power_scaler, X_train.shape[2]
 
 
-def train_model(model, train_loader, optimizer, num_epochs=500):
+def train_model(model, train_loader, optimizer, scheduler=None, num_epochs=200, test_dataloader=None, power_scaler=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+
     criterion = nn.MSELoss()
     
     model.train()
@@ -81,10 +82,23 @@ def train_model(model, train_loader, optimizer, num_epochs=500):
             optimizer.step()
             total_loss += loss.item()
         
+        if scheduler:
+            scheduler.step()
+            
         avg_loss = total_loss / len(train_loader)
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 10 ==   0:
             print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_loss:.4f}')
-
+            if test_dataloader:
+                mse, mae, preds, labels = evaluate_model(model, test_dataloader)
+                model.train()
+                preds_inv = power_scaler.inverse_transform(preds)
+                labels_inv = power_scaler.inverse_transform(labels) 
+                
+                mse_inv = np.mean((preds_inv - labels_inv)**2)
+                mae_inv = np.mean(np.abs(preds_inv - labels_inv))
+                print(f"Test MSE: {mse_inv:.4f}, Test MAE: {mae_inv:.4f}")
+            
+        
     return model, avg_loss
 
 def evaluate_model(model, data_loader):
@@ -111,41 +125,56 @@ def run_training_session(horizon):
     input_window = 90
     output_window = horizon
     train_loader, test_loader, power_scaler, input_dim = get_data_loaders(input_window, output_window)
-    
-    models_to_run = {
-        "LSTM": LSTMModel(input_dim=input_dim, hidden_dim=64, num_layers=2, output_dim=output_window),
-        "Transformer": TransformerModel(input_dim=input_dim, d_model=64, nhead=4, num_encoder_layers=3, dim_feedforward=256, output_dim=output_window),
-        "Custom": CustomModel(input_dim=input_dim, d_model=64, nhead=4, num_encoder_layers=3, dim_feedforward=256, output_dim=output_window)
-    }
 
     results = {}
 
-    for model_name, run_model in models_to_run.items():
+    for model_name in ["HTFN", "LSTM", "Transformer"]:
         print(f"--- Training {model_name} for {horizon}-day horizon ---")
         
         results[model_name] = {"MSE": [], "MAE": []}
         
         for i in range(5): # 5 runs
+            scheduler = None
+            if model_name == "LSTM":
+                run_model = LSTMModel(input_dim=input_dim, hidden_dim=128, num_layers=3, output_dim=output_window)
+                optimizer = torch.optim.Adam(run_model.parameters(), lr=0.0001)
+            elif model_name == "Transformer":
+                run_model = TransformerModel(input_dim=input_dim, d_model=128, nhead=4, num_encoder_layers=3, dim_feedforward=512, output_dim=output_window)
+                optimizer = torch.optim.Adam(run_model.parameters(), lr=0.0001)
+            elif model_name == "HTFN":
+                run_model = HTFN(
+                    input_dim=input_dim,
+                    output_dim=output_window,
+                    short_kernel_size=3,
+                    mid_kernel_size=7,
+                    long_kernel_size=15,
+                    gru_hidden_dim=128,
+                    gru_num_layers=3,
+                    cross_attention_heads=2,
+                    transformer_d_model=64,
+                    transformer_nhead=4,
+                    transformer_num_layers=4,
+                    transformer_dim_feedforward=1024,
+                    dropout=0.2
+                )
+                optimizer = torch.optim.AdamW(run_model.parameters(), lr=5e-3, weight_decay=1e-4)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=300)
+
             print(f"Run {i+1}/5")
-            mse_scores, mae_scores = [], []
-            optimizer = torch.optim.Adam(run_model.parameters(), lr=0.005)
-            trained_model, _ = train_model(run_model, train_loader, optimizer)
+            trained_model, _ = train_model(run_model, train_loader, optimizer, scheduler=scheduler, test_dataloader=test_loader, power_scaler=power_scaler)
             
             if test_loader:
                 mse, mae, preds, labels = evaluate_model(trained_model, test_loader)
             else:
                 print("Test loader is empty, skipping evaluation.")
                 mse, mae = float('nan'), float('nan')
-
-                    # mse_scores.append(mse)
-                    # mae_scores.append(mae)
             
             preds_inv = power_scaler.inverse_transform(preds)
             labels_inv = power_scaler.inverse_transform(labels) 
             
             mse_inv = np.mean((preds_inv - labels_inv)**2)
             mae_inv = np.mean(np.abs(preds_inv - labels_inv))
-            
+            # print(f"MSE: {mse_inv:.4f}, MAE: {mae_inv:.4f}")
             if i == 4 and test_loader: # Save results from the last run for plotting
                 # --- Save Model ---
                 os.makedirs('models', exist_ok=True)

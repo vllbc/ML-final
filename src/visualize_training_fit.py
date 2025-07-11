@@ -40,7 +40,7 @@ def plot_training_fit(model_name, horizon):
     print(f"Saved training fit plot to {plot_path}")
 
 def main():
-    models = ["LSTM", "Transformer", "Custom"]
+    models = ["LSTM", "Transformer", "HTFN"]
     horizons = [90, 365]
     
     for model in models:

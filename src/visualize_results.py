@@ -39,7 +39,7 @@ def main():
     """
     Main function to generate plots for all models and horizons.
     """
-    models = ['LSTM', 'Transformer', 'Custom']
+    models = ['LSTM', 'Transformer', 'HTFN']
     horizons = [90, 365]
 
     for model in models:
